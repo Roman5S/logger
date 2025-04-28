@@ -6,6 +6,8 @@
 #include <QItemDelegate>
 #include <QDate>
 #include <QTime>
+#include <QSqlTableModel>
+#include <QDebug>
 
 class FormatCallsign : public QStyledItemDelegate {
 public:
@@ -53,17 +55,62 @@ public:
 
     void initStyleOption(QStyleOptionViewItem* option, const QModelIndex& index) const {
         QStyledItemDelegate::initStyleOption(option, index);
-        option->displayAlignment = Qt::AlignVCenter | Qt::AlignCenter;
+        //option->displayAlignment = Qt::AlignVCenter | Qt::AlignCenter;
     }
 
     QString displayText(const QVariant& value, const QLocale&) const {
       //return QString(value.toInt() == 0 ? "Нет" : "Да");
         switch (value.toInt()) {
-            case 0: return "Нет"; break;
-            case 1: return "Да"; break;
-            case 3: return "Ошибка"; break;
-            default: return "Нет данных";
+            //case 0: return "Нет"; break;
+            //case 1: return "Да"; break;
+            //case 3: return "Ошибка"; break;
+            default: return "";
         }
+    }
+};
+
+class ColorSqlTableModel : public QSqlTableModel
+{
+    Q_OBJECT
+public:
+    int services = 0;
+
+    ColorSqlTableModel(QObject * parent = 0, QSqlDatabase db = QSqlDatabase())
+        : QSqlTableModel(parent,db) {;}
+    QVariant data ( const QModelIndex & index, int role = Qt::DisplayRole ) const
+    {
+        if(role==Qt::BackgroundRole)
+        {
+            if(QSqlTableModel::data(this->index(index.row(), 26)).toInt() == 0)
+            {
+                return QColor(239,81,81);
+            }
+
+            if((services == 2)&&((QSqlTableModel::data(this->index(index.row(), 26)).toInt() == 1)||(QSqlTableModel::data(this->index(index.row(), 26)).toInt() == 2)))
+            {
+                return QColor(239,153,81);
+            }
+
+            if((services == 1)&&((QSqlTableModel::data(this->index(index.row(), 26)).toInt() == 1)||(QSqlTableModel::data(this->index(index.row(), 26)).toInt() == 2)))
+            {
+                return QSqlTableModel::data(index);
+            }
+
+            else if(role == Qt::DisplayRole)
+            {
+                return QSqlTableModel::data(index);
+            }
+        }
+
+        if(role==Qt::DecorationRole && index.column() == 22)
+        {
+            if (QSqlQueryModel::data(index, Qt::DisplayRole).toInt() == 1){
+                return QIcon(":resources/images/yes.png");
+            } else {
+                return QIcon(":resources/images/no.png");
+            }
+        }
+        return QSqlTableModel::data(index,role);
     }
 };
 

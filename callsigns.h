@@ -39,13 +39,12 @@ private slots:
   void onAddPressed();
   void onRemovePressed();
   void onSavePressed();
-  void onCancelPressed();
   void requestQsosu();
   void addCallsigng();
   void on_checkCallsignBtn_clicked();
-  void callsignStatus(int status);
+  void callStatus(int status);
 
-  signals:
+signals:
   void updated();
 
 };

@@ -1,12 +1,13 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
-#include "delegations.h"
+
 #include "QRegularExpressionValidator"
 #include "qlistview.h"
 #include <QCompleter>
+#include <QSqlError>
 
 #define SET_ROBOT_FONT
-#define VERSION "1.8.1"
+
 
 MainWindow::MainWindow(QWidget *parent)
   : QMainWindow(parent)
@@ -28,9 +29,6 @@ MainWindow::MainWindow(QWidget *parent)
 
   ui->bandCombo->blockSignals(true);
   ui->modeCombo->blockSignals(true);
-
-  //ui->qthlocEdit->setReadOnly(true);
-  //ui->rdaEdit->setReadOnly(true);
   ui->actionSync->setEnabled(false);
 
   EverySecondTimer = new QTimer(this);
@@ -47,43 +45,26 @@ MainWindow::MainWindow(QWidget *parent)
           EverySecondTimer->start();
       } else {
           EverySecondTimer->stop();
-          //BugFix ui->timeInput->clear();
       }
   });
 
-  //ui->modeCombo->view()->setVerticalScrollBarPolicy(Qt::ScrollBarAlwaysOn);
-  //ui->modeCombo->setMaxVisibleItems(130);
-
   //Проверка использования и версий SSL
-  //qDebug() << "Support SSL: " << QSslSocket::supportsSsl() << " SSL Build Library: " << QSslSocket::sslLibraryBuildVersionString() << " SSL Library Version: " << QSslSocket::sslLibraryVersionString();
+  qDebug() << "Support SSL: " << QSslSocket::supportsSsl() << " SSL Build Library: " << QSslSocket::sslLibraryBuildVersionString() << " SSL Library Version: " << QSslSocket::sslLibraryVersionString();
+//------------------------------------------------------------------------------------------------------------------------------------------
 
   settings = new Settings();
   settings->setAttribute(Qt::WA_QuitOnClose, false);
   connect(settings, SIGNAL(SettingsChanged()), this, SLOT(onSettingsChanged()));
   connect(ui->actionSettings, &QAction::triggered, this, [=]() {
+      if(api->serviceAvailable) api->getUser();
       settings->show();
   });
+//------------------------------------------------------------------------------------------------------------------------------------------
 
+  qsoedit = new Qsoedit(db, settings);
+  connect(qsoedit, SIGNAL(db_updated()), this, SLOT(RefreshRecords()));
 
-  //--------Logger CAT
-  loggercat = new loggerCAT();
-  loggercat->setAttribute(Qt::WA_QuitOnClose, false);
-  connect(loggercat, SIGNAL(CATSettingsChanged()), this, SLOT(onSettingsChanged()));
-  connect(ui->actionLogger_CAT, &QAction::triggered, this, [=]() {
-      loggercat->show();
-  });
-  connect(loggercat, &loggerCAT::rigupd, this, [=]() {
-      loggercat->rigRequesting();
-  });
-
-
-  connect(loggercat, &loggerCAT::updated, this, [=]() {
-      unsigned int rigFreq = loggercat->rigFreq;
-      QString rigMode = loggercat->rigMode;
-      ui->bandCombo->setCurrentText(Helpers::GetBandByFreqHz(rigFreq));
-      ui->freqInput->setText(QString::number((double) rigFreq / 1000000, 'f', 6));
-      ui->modeCombo->setCurrentText(rigMode);
-  });
+//------------------------------------------------------------------------------------------------------------------------------------------
 
   ui->modeCombo->setEditable(true); //Включаем встроенный QLineEdit
   ui->modeCombo->setInsertPolicy(QComboBox::NoInsert); // отключаем вставку новых элементов из QLineEdit
@@ -94,33 +75,65 @@ MainWindow::MainWindow(QWidget *parent)
 
   InitDatabase("data.db");
 
-  udpReceiver = new UdpReceiver(this);
+  qsosuLbl = new QLabel(this);
+  statusBar()->insertPermanentWidget(0, qsosuLbl, 0);
+  qsosuLabel = new QLabel(this);
+  statusBar()->insertPermanentWidget(1, qsosuLabel, 0);
+  udpserverLbl = new QLabel(this);
+  statusBar()->insertPermanentWidget(2, udpserverLbl, 0);
+  udpserverLabel = new QLabel(this);
+  statusBar()->insertPermanentWidget(3, udpserverLabel, 0);
+  flrigLbl = new QLabel(this);
+  statusBar()->insertPermanentWidget(4, flrigLbl, 0);
+  flrigLabel = new QLabel(this);
+  statusBar()->insertPermanentWidget(5, flrigLabel, 0);
+  catLbl = new QLabel(this);
+  statusBar()->insertPermanentWidget(6, catLbl, 0);
+  catLabel = new QLabel(this);
+  statusBar()->insertPermanentWidget(7, catLabel, 0);
+
+  udpserverLbl->setText("UDP: ");
+  flrigLbl->setText("FLRIG: ");
+  qsosuLbl->setText("Сервис QSO.SU: ");
+  qsosuLabel->setText("Offline");
+  qsosuLabel->setStyleSheet("QLabel { color: red }");
+  catLbl->setText("CAT: ");
+
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+  udpServer = new UdpServer(this);
   if (settings->udpServerEnable) {
-      if (udpReceiver->start(settings->udpServerPort)) {
-          connect(udpReceiver, &UdpReceiver::heartbeat, this, [=]() {
-              ui->statusbar->showMessage(QString("UDP: получен HEARTBEAT - %1 %2").arg(QString::fromUtf8(udpReceiver->version), QString::fromUtf8(udpReceiver->revision)), 1000);
+      if (udpServer->start(settings->udpServerPort)) {
+          connect(udpServer, &UdpServer::heartbeat, this, [=]() {
+              ui->statusbar->showMessage(QString("UDP: получен HEARTBEAT - %1 %2").arg(QString::fromUtf8(udpServer->version), QString::fromUtf8(udpServer->revision)), 1000);
           });
 
-          connect(udpReceiver, &UdpReceiver::logged, this, &MainWindow::onUdpLogged);
+          connect(udpServer, &UdpServer::logged, this, &MainWindow::onUdpLogged);
           ui->statusbar->showMessage("UDP сервер запущен на порту " + QString::number(settings->udpServerPort), 3000);
-          ui->udpserverLabel->setText("Запущен");
-          ui->udpserverLabel->setStyleSheet("QLabel { color: green }");
+          udpserverLabel->setText("Запущен");
+          udpserverLabel->setStyleSheet("QLabel { color: green }");
       } else {
-          ui->udpserverLabel->setText("Ошибка");
-          ui->udpserverLabel->setStyleSheet("QLabel { color: red }");
+          udpserverLabel->setText("Ошибка");
+          udpserverLabel->setStyleSheet("QLabel { color: red }");
           //QMessageBox::critical(nullptr, "Ошибка", "Ошибка запуска UDP сервера");
       }
   }
-
+  if (settings->udpClientEnable) {
+      udpServer->setRetransl(true);
+      udpServer->setRetranslPort(settings->udpClientPort);
+  }
+//------------------------------------------------------------------------------------------------------------------------------------------
   flrig = new Flrig(settings->flrigHost, settings->flrigPort, 500, this);
+  flrigLabel->setText("Отключен");
+  flrigLabel->setStyleSheet("QLabel { color: red; }");
   connect(flrig, &Flrig::connected, this, [=]() {
-    ui->flrigLabel->setText("Подключен");
-    ui->flrigLabel->setStyleSheet("QLabel { color: green; }");
+    flrigLabel->setText("Подключен");
+    flrigLabel->setStyleSheet("QLabel { color: green; }");
     ui->statusbar->showMessage("Подключен к FLRIG", 1000);
   });
   connect(flrig, &Flrig::disconnected, this, [=]() {
-    ui->flrigLabel->setText("Отключен");
-    ui->flrigLabel->setStyleSheet("");
+    flrigLabel->setText("Отключен");
+    flrigLabel->setStyleSheet("QLabel { color: red; }");
     ui->statusbar->showMessage("Отключен от FLRIG", 1000);
   });
   connect(flrig, &Flrig::updated, this, [=]() {
@@ -133,9 +146,7 @@ MainWindow::MainWindow(QWidget *parent)
   connect(flrig, &Flrig::rpcError, this, [=]() {
     ui->statusbar->showMessage(QString("Ошибка XML-RPC: %1 %2").arg(QString::number(flrig->getErrorCode()), flrig->getErrorString()), 300);
   });
-
-
-
+//------------------------------------------------------------------------------------------------------------------------------------------
   adif = new Adif(db);
   connect(ui->actionExportAdif, &QAction::triggered, this, [=]() {
       if (userData.callsign_id > 0) adif->Export(userData.callsign_id);
@@ -151,9 +162,10 @@ MainWindow::MainWindow(QWidget *parent)
 
   CallTypeTimer = new QTimer(this);
   CallTypeTimer->setSingleShot(true);
-  CallTypeTimer->setInterval(2000);
+  CallTypeTimer->setInterval(1000);
+
   connect(CallTypeTimer, &QTimer::timeout, this, [=]() {
-      if (settings->enableQrzruCallbook) FindCallDataQrzru();
+     if (settings->enableQrzruCallbook || settings->useCallbook) FindCallData();
   });
 
   api = new HttpApi(db, settings->accessToken);
@@ -165,8 +177,21 @@ MainWindow::MainWindow(QWidget *parent)
       QMessageBox::critical(0, "Ошибка", "Ошибка обращения к API: " + QString::number(error), QMessageBox::Ok);
       return;
   });
-  connect(api, &HttpApi::synced, this, &MainWindow::onQsoSynced);
+  connect(api, &HttpApi::synced, this, &MainWindow::onQSOSUSynced);
+  connect(api, SIGNAL(getUserInfo(QStringList)), settings, SLOT(getUserInfo(QStringList)));
 
+  if(settings->accessToken.length() != 0)
+  {
+      PingQsoSu();
+      QsoSuPingTimer = new QTimer(this);
+      QsoSuPingTimer->setInterval(2000); //5 секунд
+      connect(QsoSuPingTimer, &QTimer::timeout, this, [=]() {
+          PingQsoSu();
+      });
+      QsoSuPingTimer->start();
+  }
+
+//------------------------------------------------------------------------------------------------------------------------------------------
   callsigns = new Callsigns(db, api, this);
   callsigns->setAttribute(Qt::WA_QuitOnClose, false);
   connect(callsigns, &Callsigns::updated, this, &MainWindow::onCallsignsUpdated);
@@ -189,12 +214,15 @@ MainWindow::MainWindow(QWidget *parent)
   connect(ui->saveQsoButton, SIGNAL(clicked()), this, SLOT(SaveQso()));
   connect(ui->refreshButton, &QPushButton::clicked, this, [=] {
       RefreshRecords();
-      //ScrollRecordsToBottom();
       ScrollRecordsToTop();
   });
   connect(ui->bandCombo, SIGNAL(currentIndexChanged(int)), this, SLOT(fillDefaultFreq()));
   connect(ui->tableView, SIGNAL(customContextMenuRequested(QPoint)), SLOT(customMenuRequested(QPoint)));
+  connect(ui->tableView, SIGNAL(doubleClicked(QModelIndex)), this, SLOT(doubleClickedQSO(QModelIndex)));
 
+  logradio = new APILogRadio(settings->logRadioAccessToken);
+  connect(logradio, &APILogRadio::synced, this, &MainWindow::onLogRadioSynced);
+//------------------------------------------------------------------------------------------------------------------------------------------
   connect(ui->actionAbout, &QAction::triggered, this, [=]() {
       about = new About(this);
       about->setWindowFlags(Qt::Dialog | Qt::MSWindowsFixedSizeDialogHint);
@@ -207,13 +235,15 @@ MainWindow::MainWindow(QWidget *parent)
   connect(ui->actionQsosuFaqLink, &QAction::triggered, this, [=]() {
       QDesktopServices::openUrl(QUrl("https://qso.su/ru/faq"));
   });
-
+//------------------------------------------------------------------------------------------------------------------------------------------
   connect(api, SIGNAL(HamDefsUploaded()), this, SLOT(HamDefsUploaded()));
   connect(api, SIGNAL(HamDefsError()), this, SLOT(HamDefsError()));
+  connect(api, SIGNAL(userDataUpdated()), this, SLOT(setUserData()));
+  connect(api, SIGNAL(confirmQSOs()), this, SLOT(onQSOConfirmed()));
 
   qInfo() << "QSOLogger v." << VERSION << " started.";
+  qInfo() << "Product Name: " << QSysInfo::prettyProductName();
   LoadHamDefs(); //Загрузка XML-файла с диапазонами и модуляциями
-
   InitRecordsTable();
   getCallsigns();
   fillDefaultFreq();
@@ -222,13 +252,51 @@ MainWindow::MainWindow(QWidget *parent)
 
   if(settings->darkTheime) darkTheime();
   else qApp->setPalette(style()->standardPalette());
+
+  RemoveDeferredQSOs(); //Удаляем с QSO.SU ранее не удаленные QSO
+
+  ui->SRRIcon->setVisible(false);
+  ui->SRRLabel->setVisible(false);
+  ui->QSOSUUserIcon->setVisible(false);
+  ui->QSOSUUserLabel->setVisible(false);
+  catLabel->setText("Отключен");
+  catLabel->setStyleSheet("QLabel { color: red; }");
+
+  CAT = new cat_Interface(settings->catEnable);
+
+  connect(ui->actionCAT, &QAction::toggled, this, [=](bool state) {
+     if(state) {
+       CAT->catTimer->start();
+       settings->catEnable = true;
+       catLabel->setText("Включен");
+       catLabel->setStyleSheet("QLabel { color: green; }");
+     } else {
+       CAT->catTimer->stop();
+       settings->catEnable = false;
+       catLabel->setText("Отключен");
+       catLabel->setStyleSheet("QLabel { color: red; }");
+     }
+  });
+
+   if(settings->catEnable) {
+       //ui->actionCAT->setChecked(true);
+       bool portAvailable = CAT->openSerial(settings->serialPort);
+       if(portAvailable) {
+           CAT->setInterval(settings->catInterval);
+           CAT->catSetBaudRate(settings->serialPortBaud.toInt());
+           CAT->catSetDataBits(settings->serialPortDataBits.toInt());
+           CAT->catSetStopBit(settings->serialPortStopBit.toInt());
+           CAT->catSetParity(settings->serialPortParity);
+           CAT->catSetFlowControl(settings->serialPortFlowControl);
+           connect(CAT, SIGNAL(cat_freq(long)), this, SLOT(setFreq(long)));
+           connect(CAT, SIGNAL(cat_band(int)), this, SLOT(setBand(int)));
+           connect(CAT, SIGNAL(cat_mode(int)), this, SLOT(setMode(int)));           
+       }
+   }
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 MainWindow::~MainWindow() {
-    if (loggercat->serialPort->isOpen()){ //закрываем порт, если он открыт
-        loggercat->serialPort->close();
-    }
   delete ui;
 }
 
@@ -236,7 +304,11 @@ MainWindow::~MainWindow() {
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void MainWindow::InitDatabase(QString dbFile) {
-    database_file = qApp->applicationDirPath() + "/" + dbFile;
+
+    if(!QDir(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation)).exists())
+        QDir().mkdir(QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation));
+
+    database_file = QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation) + "/" + dbFile;
     if (!CheckDatabase()) {
         qWarning() << "Database file does not exist. Creating new.";
         CreateDatabase();
@@ -245,7 +317,7 @@ void MainWindow::InitDatabase(QString dbFile) {
         ui->statusbar->showMessage("Файл БД открыт", 3000);
     } else {
         qWarning() << "Error while open database file";
-        QMessageBox::critical(0, "Ошибка", "Ошибка открытия файла БД", QMessageBox::Ok);
+        //QMessageBox::critical(0, "Ошибка", "Ошибка открытия файла БД", QMessageBox::Ok);
         return;
     }
 }
@@ -268,6 +340,7 @@ void MainWindow::CreateDatabase() {
   }
   QSqlQuery query(db);
   qInfo() << "Creating CALLSIGNS table";
+  query.exec("PRAGMA foreign_keys = ON");
   query.exec("CREATE TABLE \"callsigns\" (\"id\" INTEGER NOT NULL, \"qsosu_id\" INTEGER NOT NULL DEFAULT 0, \"type\" INTEGER NOT NULL DEFAULT 10, \"name\" TEXT NOT NULL, \"validity_start\" INTEGER NOT NULL DEFAULT 0, \"validity_stop\" INTEGER NOT NULL DEFAULT 0, \"gridsquare\" TEXT NOT NULL, \"cnty\" TEXT, \"ituz\" INTEGER NOT NULL DEFAULT 0, \"cqz\" INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(\"id\" AUTOINCREMENT))");
   qInfo() << "Creating RECORDS table";
   query.exec("CREATE TABLE \"records\" ("
@@ -294,7 +367,17 @@ void MainWindow::CreateDatabase() {
              "\"CNTY\" TEXT,"
              "\"COMMENT\" TEXT,"
              "\"sync_state\" INTEGER NOT NULL DEFAULT 0,"
+             "\"HASH\" TEXT,"
+             "\"ITUZ\" INTEGER,"
+             "\"CQZ\" INTEGER,"
+             "\"SYNC_QSO\" INTEGER,"
+             "\"COUNTRY\" TEXT,"
+             "\"CONT\" TEXT,"
              "PRIMARY KEY(\"id\" AUTOINCREMENT))");
+  qInfo() << "Creating DELRECORDS table";
+  query.exec("CREATE TABLE \"delrecords\" (\"id\" INTEGER NOT NULL, \"HASH\" TEXT, PRIMARY KEY(\"id\" AUTOINCREMENT))");
+  query.exec("CREATE TABLE \"synchronization\" (\"id\" INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, \"key\" INTEGER NOT NULL, "
+             "\"id_log\" INTEGER NOT NULL, \"time_update\" INTEGER, FOREIGN KEY (\"id_log\") REFERENCES \"records\" (\"id\") ON DELETE CASCADE)");
   query.finish();
   db.close();
 }
@@ -323,11 +406,7 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
 
 void MainWindow::getCallsigns() {
   ui->stationCallsignCombo->clear();
-  //ui->stationCallsignCombo->setCurrentIndex(0); //Bug Fix Change
-  //ui->stationCallsignCombo->addItem("- Не выбран -", 0); //Bug Fix Change
   ui->operatorCombo->clear();
-  //ui->operatorCombo->setCurrentIndex(0); //Bug Fix Change
-  //ui->operatorCombo->addItem("- Не выбран -", 0); //Bug Fix Change
 
   QSqlQuery query(db);
   query.exec("SELECT id, qsosu_id, type, name, gridsquare, cnty FROM callsigns");
@@ -345,7 +424,7 @@ void MainWindow::getCallsigns() {
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void MainWindow::InitRecordsTable() {
-  RecordsModel = new QSqlTableModel(this);
+  RecordsModel = new ColorSqlTableModel(this);
   RecordsModel->setTable("records");
 
   //RecordsModel->setEditStrategy(QAbstractItemView::NoEditTriggers);
@@ -366,6 +445,9 @@ void MainWindow::InitRecordsTable() {
   RecordsModel->setHeaderData(21, Qt::Horizontal, tr("Коммент."));
   RecordsModel->setHeaderData(22, Qt::Horizontal, tr("Синхр."));
 
+  if(settings->logRadioAccessToken.length() != 0) RecordsModel->services = 2;
+  else RecordsModel->services = 1;
+
   ui->tableView->setModel(RecordsModel);
   ui->tableView->setEditTriggers(QAbstractItemView::NoEditTriggers);
   ui->tableView->setColumnHidden(0, true);
@@ -376,6 +458,10 @@ void MainWindow::InitRecordsTable() {
   ui->tableView->setColumnHidden(5, true);
   ui->tableView->setColumnHidden(6, true);
   ui->tableView->setColumnHidden(7, true);
+  ui->tableView->setColumnHidden(23, true);
+  ui->tableView->setColumnHidden(26, true);
+  ui->tableView->setColumnHidden(27, true);
+  ui->tableView->setColumnHidden(28, true);
 
   ui->tableView->setItemDelegateForColumn(8, new FormatCallsign(ui->tableView));
   ui->tableView->setItemDelegateForColumn(9, new FormatDate(ui->tableView));
@@ -390,7 +476,7 @@ void MainWindow::InitRecordsTable() {
 
   QHeaderView *horizontalHeader = ui->tableView->horizontalHeader();
   horizontalHeader->setSectionResizeMode(QHeaderView::Interactive);
-  horizontalHeader->setMinimumSectionSize(70);
+  horizontalHeader->setMinimumSectionSize(32);
   horizontalHeader->setStretchLastSection(true);
   horizontalHeader->setFont(QFont("Roboto", settings->fontSize, QFont::Normal, false));
 
@@ -422,38 +508,43 @@ void MainWindow::customMenuRequested(QPoint pos) {
     if (indexes.count() == 0) return;
 
     QMenu *menu = new QMenu(this);
+
     QAction *deleteAction = new QAction((indexes.count() > 1) ? "Удалить выбранные" : "Удалить", this);
     connect(deleteAction, &QAction::triggered, this, [=]() {
         RemoveQSOs(indexes);
     });
 
-    QAction *exportAction = new QAction((indexes.count() > 1) ? "Экспорт выбранных в ADIF" : "Экспорт в ADIF", this);
-    connect(exportAction, &QAction::triggered, this, [=]() {
-        QList<int> items;
-        for (int i = indexes.count(); i > 0; i--) {
-            int index = indexes.at(i-1).row();
-            int id = RecordsModel->data(RecordsModel->index(index, 0)).toInt();
-            items.append(id);
-        }
-        adif->ExportPartial(items);
-    });
+//    QAction *exportAction = new QAction((indexes.count() > 1) ? "Экспорт выбранных в ADIF" : "Экспорт в ADIF", this);
+//    connect(exportAction, &QAction::triggered, this, [=]() {
+//        QList<int> items;
+//        for (int i = indexes.count(); i > 0; i--) {
+//            int index = indexes.at(i-1).row();
+//            int id = RecordsModel->data(RecordsModel->index(index, 0)).toInt();
+//            items.append(id);
+//        }
+//        adif->ExportPartial(items);
+//    });
 
     QAction *syncAction = new QAction((indexes.count() > 1) ? "Синхронизировать выбранные" : "Синхронизировать", this);
     connect(syncAction, &QAction::triggered, this, [=]() {
         SyncQSOs(indexes);
     });
 
+    QAction *qsoEditAction = new QAction("Редактировать QSO", this);
+    connect(qsoEditAction, &QAction::triggered, this, [=]() {
+        EditQSO(indexes.at(0));
+    });
+
     menu->addAction(deleteAction);
-    menu->addAction(exportAction);
+    //menu->addAction(exportAction);
     menu->addAction(syncAction);
+    menu->addAction(qsoEditAction);
     menu->popup(ui->tableView->viewport()->mapToGlobal(pos));
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void MainWindow::SaveQso()
 {
-  //qDebug() << "USER DATA:" << userData.callsign_id << userData.qsosu_callsign_id << userData.qsosu_operator_id << userData.callsign << userData.oper << userData.gridsquare << userData.cnty;
-
   if(ui->callInput->text().size() < 3) {
        QMessageBox::critical(0, "Ошибка", "Не возможно сохранить QSO. Не введен позывной кореспондента!", QMessageBox::Ok);
        return;
@@ -466,13 +557,21 @@ void MainWindow::SaveQso()
   newRecord.setValue("qsosu_operator_id", userData.qsosu_operator_id);
   newRecord.setValue("STATION_CALLSIGN", userData.callsign);
   newRecord.setValue("OPERATOR", userData.oper);
+
+  QStringList data;
+  data.append(api->callsignInfo);
+  if(data.count() > 11) {
+    newRecord.setValue("COUNTRY", data.at(8));
+    newRecord.setValue("CONT", data.at(9));
+    newRecord.setValue("ITUZ", data.at(10));
+    newRecord.setValue("CQZ", data.at(11));
+  }
+
   QString call = ui->callInput->text();
   newRecord.setValue("CALL", call);
 
-  //QDate qsoDate = QDate::fromString(ui->dateInput->text(), "yyyy-MM-dd");
   QDate qsoDate = ui->dateInput->date();
   newRecord.setValue("QSO_DATE", qsoDate.toString("yyyyMMdd"));
-  //QTime qsoTime = QTime::fromString(ui->timeEdit->text(), "hh:mm:ss");
   QTime qsoTime = ui->timeEdit->time();
 
   //BugFix
@@ -480,26 +579,21 @@ void MainWindow::SaveQso()
   QString time = qsoTime.toString("hh:mm:ss");
   QString datetime = date + "T" + time;
 
-
   QString qsoTimeFormated = qsoTime.toString("hhmmss");
   newRecord.setValue("TIME_ON", qsoTimeFormated);
   newRecord.setValue("TIME_OFF", qsoTimeFormated);
 
-  //QString band = ui->bandCombo->currentText();
   QString band = getBandValue(ui->bandCombo->currentIndex()); //BugFix
   newRecord.setValue("BAND", band);
 
   unsigned long long freqHz = static_cast<unsigned long long>(ui->freqInput->text().toDouble() * 1000000);
   newRecord.setValue("FREQ", freqHz);
-
-  //QString mode = ui->modeCombo->currentText();
   QString mode = getModeValue(ui->modeCombo->currentText()); //BugFix
   newRecord.setValue("MODE", mode);
-
   QString rsts = ui->rstsInput->text();
   newRecord.setValue("RST_SENT", rsts);
   QString rstr = ui->rstrInput->text();
-  newRecord.setValue("RST_RCVD", rsts);
+  newRecord.setValue("RST_RCVD", rstr);
   QString name = ui->nameInput->text();
   newRecord.setValue("NAME",name);
   QString qth = ui->qthInput->text();
@@ -510,26 +604,22 @@ void MainWindow::SaveQso()
   newRecord.setValue("CNTY", cnty);
   newRecord.setValue("COMMENT", ui->commentInput->text());
   newRecord.setValue("sync_state", 0);
-
-  //BugFix Added my_gridsquare and my_cnty
   QString my_gridsquare = ui->qthlocEdit->text().toUpper();
   newRecord.setValue("MY_GRIDSQUARE", my_gridsquare);
-
   QString my_cnty = ui->rdaEdit->text().toUpper();
   newRecord.setValue("MY_CNTY", my_cnty);
 
   if (RecordsModel->insertRecord(-1, newRecord)) {
       RecordsModel->submitAll();
-
       // Здесь надо отправлять QSO на сервис через API
       int LastID = RecordsModel->query().lastInsertId().toInt();
       QVariantList data;
       data << LastID << userData.qsosu_callsign_id << userData.qsosu_operator_id;
       data << call << band << mode << freqHz << datetime << name << rsts << rstr << qth << cnty << gridsquare << my_cnty << my_gridsquare;
       api->SendQso(data);
-
+      data << userData.callsign;
+      logradio->SendQso(data);
       RefreshRecords();
-      //ScrollRecordsToBottom();
       ScrollRecordsToTop();
       ClearQso();
       ui->callInput->setFocus();
@@ -548,6 +638,10 @@ void MainWindow::ClearQso() {
   ui->qthInput->clear();
   ui->nameInput->clear();
   ui->commentInput->clear();
+  ui->SRRIcon->setVisible(false);
+  ui->SRRLabel->setVisible(false);
+  ui->QSOSUUserIcon->setVisible(false);
+  ui->QSOSUUserLabel->setVisible(false);
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -560,16 +654,20 @@ void MainWindow::RemoveQSOs(QModelIndexList indexes) {
     if (reply == QMessageBox::Yes) {
         db.transaction();
         QSqlQuery query(db);
+        query.exec("PRAGMA foreign_keys = ON");
         query.prepare("DELETE FROM records WHERE id = ?");
         for (int i = countRow; i > 0; i--) {
             int id = RecordsModel->data(RecordsModel->index(indexes.at(i-1).row(), 0)).toInt();
+
+            QString hash = RecordsModel->data(RecordsModel->index(indexes.at(i-1).row(), 23), 0).toString();
+            if(api->serviceAvailable) api->deleteByHashLog(hash);
+            else insertDataToDeferredQSOs(id, hash);
+
             query.addBindValue(id);
             query.exec();
         }
         db.commit();
-
         RefreshRecords();
-        //ScrollRecordsToBottom(); //BugFix
         ScrollRecordsToTop();
     } else {
         return;
@@ -639,7 +737,6 @@ void MainWindow::onStationCallsignChanged() {
 
   SetRecordsFilter(userData.callsign_id);
   RefreshRecords();
-  //ScrollRecordsToBottom(); //BugFix
   ScrollRecordsToTop();
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -652,15 +749,6 @@ void MainWindow::onOperatorChanged() {
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void MainWindow::onUdpLogged() {
-  // if (ui->stationCallsignCombo->currentIndex() == 0) {
-  //   QMessageBox::critical(0, "Ошибка", "UDP: Не выбран позывной станции", QMessageBox::Ok);
-  //   return;
-  // }
-  // if (ui->operatorCombo->currentIndex() == 0) {
-  //   QMessageBox::critical(0, "Ошибка", "UDP: Не выбран позывной оператора", QMessageBox::Ok);
-  //   return;
-  // }
-
   qDebug() << "Creating database record for UDP message";
   QSqlRecord newRecord = RecordsModel->record();
   newRecord.remove(newRecord.indexOf("id"));
@@ -671,20 +759,19 @@ void MainWindow::onUdpLogged() {
   newRecord.setValue("OPERATOR", userData.oper);
   newRecord.setValue("MY_GRIDSQUARE", userData.gridsquare);
   newRecord.setValue("MY_CNTY", userData.cnty);
-  newRecord.setValue("QSO_DATE", udpReceiver->time_off.date().toString("yyyyMMdd"));
-  newRecord.setValue("TIME_OFF", udpReceiver->time_off.time().toString("hhmm") + "00");
-  newRecord.setValue("TIME_ON", udpReceiver->time_on.time().toString("hhmm") + "00");
-  newRecord.setValue("CALL", QString::fromUtf8(udpReceiver->dx_call));
-  newRecord.setValue("BAND", Helpers::GetBandByFreqHz(udpReceiver->tx_frequency_hz));
-  newRecord.setValue("FREQ", udpReceiver->tx_frequency_hz);
-  newRecord.setValue("MODE", QString::fromUtf8(udpReceiver->mode));
-  newRecord.setValue("NAME", QString::fromUtf8(udpReceiver->name));
+  newRecord.setValue("QSO_DATE", udpServer->time_off.date().toString("yyyyMMdd"));
+  newRecord.setValue("TIME_OFF", udpServer->time_off.time().toString("hhmm") + "00");
+  newRecord.setValue("TIME_ON", udpServer->time_on.time().toString("hhmm") + "00");
+  newRecord.setValue("CALL", QString::fromUtf8(udpServer->dx_call));
+  newRecord.setValue("BAND", Helpers::GetBandByFreqHz(udpServer->tx_frequency_hz));
+  newRecord.setValue("FREQ", udpServer->tx_frequency_hz);
+  newRecord.setValue("MODE", QString::fromUtf8(udpServer->mode));
+  newRecord.setValue("NAME", QString::fromUtf8(udpServer->name));
   newRecord.setValue("QTH", "");
-  newRecord.setValue("GRIDSQUARE", QString::fromUtf8(udpReceiver->dx_grid));
-  newRecord.setValue("RST_SENT", QString::fromUtf8(udpReceiver->report_sent));
-  newRecord.setValue("RST_RCVD", QString::fromUtf8(udpReceiver->report_received));
-  newRecord.setValue("COMMENT", QString::fromUtf8(udpReceiver->comments));
-
+  newRecord.setValue("GRIDSQUARE", QString::fromUtf8(udpServer->dx_grid));
+  newRecord.setValue("RST_SENT", QString::fromUtf8(udpServer->report_sent));
+  newRecord.setValue("RST_RCVD", QString::fromUtf8(udpServer->report_received));
+  newRecord.setValue("COMMENT", QString::fromUtf8(udpServer->comments));
   newRecord.setValue("sync_state", 0);
 
   if(RecordsModel->insertRecord(-1, newRecord)) {
@@ -693,14 +780,14 @@ void MainWindow::onUdpLogged() {
 
         int LastID = RecordsModel->query().lastInsertId().toInt();
         QVariantList data;
-        QString datetime = udpReceiver->time_on.date().toString("yyyy-MM-dd") + "T" + udpReceiver->time_on.time().toString("hh:mm:00");
+        QString datetime = udpServer->time_on.date().toString("yyyy-MM-dd") + "T" + udpServer->time_on.time().toString("hh:mm:00");
         data << LastID << userData.qsosu_callsign_id << userData.qsosu_operator_id;
-        data << QString::fromUtf8(udpReceiver->dx_call) << Helpers::GetBandByFreqHz(udpReceiver->tx_frequency_hz) << QString::fromUtf8(udpReceiver->mode);
-        data << udpReceiver->tx_frequency_hz << datetime << QString::fromUtf8(udpReceiver->name) << QString::fromUtf8(udpReceiver->report_sent) << QString::fromUtf8(udpReceiver->report_received) << "" << "" << QString::fromUtf8(udpReceiver->dx_grid);
+        data << QString::fromUtf8(udpServer->dx_call) << Helpers::GetBandByFreqHz(udpServer->tx_frequency_hz) << QString::fromUtf8(udpServer->mode);
+        data << udpServer->tx_frequency_hz << datetime << QString::fromUtf8(udpServer->name) << QString::fromUtf8(udpServer->report_sent) << QString::fromUtf8(udpServer->report_received) << "" << "" << QString::fromUtf8(udpServer->dx_grid);
         api->SendQso(data);
-
+        data << userData.gridsquare << "" << userData.callsign;
+        logradio->SendQso(data);
         RefreshRecords();
-        //ScrollRecordsToBottom(); //BugFix
         ScrollRecordsToTop();
         ClearQso();
       }
@@ -708,18 +795,73 @@ void MainWindow::onUdpLogged() {
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
-void MainWindow::FindCallDataQrzru() {
+void MainWindow::FindCallData() {
   QString callsign = ui->callInput->text().trimmed();
   if (callsign.isEmpty()) {
       ClearCallbookFields();
+      ui->QSOSUUserIcon->setVisible(false);
+      ui->QSOSUUserLabel->setVisible(false);
+      ui->SRRIcon->setVisible(false);
+      ui->SRRLabel->setVisible(false);
       return;
   }
 
-  QStringList data = qrz->Get(callsign);
+  if(settings->useCallbook) {
+      api->getCallbook(callsign);
+      qDebug() << "Use QSO.SU callbook.";
+  }
+  if(settings->enableQrzruCallbook){
+      QStringList data = qrz->Get(callsign);
+      ui->nameInput->setText((data.at(0).length() > 0) ? data.at(0) : "");
+      ui->qthInput->setText((data.at(1).length() > 0) ? data.at(1) : "");
+      ui->gridsquareInput->setText((data.at(2).length() > 0) ? data.at(2).toUpper() : "");
+      ui->cntyInput->setText((data.at(3).length() > 0) ? data.at(3).toUpper() : "");
+      qDebug() << "Use QRZ.RU callbook.";
+   }
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::setUserData() {
+  QStringList data;
+  data.append(api->callsignInfo);
+
   ui->nameInput->setText((data.at(0).length() > 0) ? data.at(0) : "");
   ui->qthInput->setText((data.at(1).length() > 0) ? data.at(1) : "");
   ui->gridsquareInput->setText((data.at(2).length() > 0) ? data.at(2).toUpper() : "");
   ui->cntyInput->setText((data.at(3).length() > 0) ? data.at(3).toUpper() : "");
+
+  if(data.at(4).length() > 0) {
+     if(data.at(4) == "1") {
+         ui->QSOSUUserIcon->setPixmap(QPixmap(":resources/images/loguser.png"));
+         ui->QSOSUUserIcon->setVisible(true);
+         ui->QSOSUUserLabel->setVisible(true);
+         ui->QSOSUUserLabel->setText("Пользователь QSO.SU");
+         ui->QSOSUUserLabel->setStyleSheet("QLabel { font-weight: bold; color: rgb(25, 135, 84) }");
+     } else {
+         ui->QSOSUUserIcon->setPixmap(QPixmap(":resources/images/no_loguser.png"));
+         ui->QSOSUUserLabel->setText("Не пользователь QSO.SU");
+         ui->QSOSUUserLabel->setStyleSheet("QLabel { font-weight: bold; color: rgb(220, 53, 69) }");
+     }
+  } else {
+      ui->QSOSUUserIcon->setVisible(false);
+      ui->QSOSUUserLabel->setVisible(false);
+  }
+
+  if(data.at(5).length() > 0) {
+     if(data.at(5) == "1") {
+         ui->SRRIcon->setPixmap(QPixmap(":resources/images/srr_user.png"));
+         ui->SRRIcon->setVisible(true);
+         ui->SRRLabel->setVisible(true);
+         ui->SRRLabel->setText("Член СРР");
+         ui->SRRLabel->setStyleSheet("QLabel { font-weight: bold; color: rgb(25, 135, 84) }");
+     } else {
+         ui->SRRIcon->setVisible(false);
+         ui->SRRLabel->setVisible(false);
+     }
+  } else {
+      ui->SRRIcon->setVisible(false);
+      ui->SRRLabel->setVisible(false);
+  }
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -748,8 +890,6 @@ void MainWindow::SyncQSOs(QModelIndexList indexes) {
     query.exec(QString("SELECT id, qsosu_callsign_id, qsosu_operator_id, CALL, BAND, MODE, FREQ, QSO_DATE, TIME_OFF, NAME, RST_SENT, RST_RCVD, QTH, CNTY, GRIDSQUARE MY_CNTY, MY_GRIDSQUARE FROM records WHERE id IN (%1) ORDER BY id").arg(numberlist));
     while (query.next()) {
         int dbid = query.value(0).toInt();
-        int qsosu_callsign_id = query.value(1).toInt();
-        int qsosu_operator_id = query.value(2).toInt();
         QString call = query.value(3).toString();
         QString band = query.value(4).toString();
         QString mode = query.value(5).toString();
@@ -767,15 +907,48 @@ void MainWindow::SyncQSOs(QModelIndexList indexes) {
         QString my_gridsquare = query.value(16).toString();
 
         QVariantList data;
-        data << dbid << qsosu_callsign_id << qsosu_operator_id << call << band << mode << freqHz << datetime << name << rsts << rstr << qth << cnty << gridsquare << my_cnty << my_gridsquare;
+        data << dbid << userData.qsosu_callsign_id << userData.qsosu_operator_id;
+        data << call << band << mode << freqHz << datetime << name << rsts << rstr << qth << cnty << gridsquare << my_cnty << my_gridsquare;
         api->SendQso(data);
+        data << userData.callsign;
+        if(settings->logRadioAccessToken.count() > 0) logradio->SendQso(data);
     }
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
-void MainWindow::onQsoSynced(int dbid) {
+void MainWindow::onQSOSUSynced(int dbid, QString hash)
+{
+    int state = 0;
     QSqlQuery query(db);
-    if(query.exec(QString("UPDATE records SET sync_state = 1 WHERE id=%1").arg(dbid))) {
+
+    state = getSynchroStatus(dbid);
+    query.prepare("UPDATE records SET sync_state = 1, SYNC_QSO = :nstate, HASH = :hash WHERE id=:id");
+    query.bindValue(":hash", hash);
+    query.bindValue(":id", dbid);
+    query.bindValue(":nstate", state |= (1 << 0));
+
+    if(!query.exec()){
+        qDebug() << "ERROR UPDATE TABLE records FROM QSO.SU " << query.lastError().text();
+    } else {
+        RefreshRecords();
+        ScrollRecordsToTop();
+    }
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::onLogRadioSynced(int dbid)
+{
+    int state = 0;
+    QSqlQuery query(db);
+
+    state = getSynchroStatus(dbid);
+    query.prepare("UPDATE records SET SYNC_QSO = :nstate WHERE id=:id");
+    query.bindValue(":id", dbid);
+    query.bindValue(":nstate", state |= (1 << 1));
+
+    if(!query.exec()){
+        qDebug() << "ERROR UPDATE TABLE records FROM LOGRADIO.RU " << query.lastError().text();
+    } else {
         RefreshRecords();
         ScrollRecordsToTop();
     }
@@ -835,19 +1008,19 @@ void MainWindow::readXmlfile()
             modeList.append(mData);
             ui->modeCombo->addItem(Mode.attribute("mode_name"));
         }
-    }
+    }    
+
     ui->bandCombo->blockSignals(false);
     ui->modeCombo->blockSignals(false);
     ui->stationCallsignCombo->blockSignals(false);
-
     ui->bandCombo->setCurrentText(settings->lastBand);
-    ui->modeCombo->setCurrentText(settings->lastMode);
+    if(settings->lastMode == "") ui->modeCombo->setCurrentText("CW");
+    else ui->modeCombo->setCurrentText(settings->lastMode);
     ui->qthlocEdit->setText(settings->lastLocator);
     ui->rdaEdit->setText(settings->lastRDA);
     ui->freqInput->setText(settings->lastFrequence);
     ui->rstrInput->setText(settings->lastRST_RCVD);
     ui->rstsInput->setText(settings->lastRST_SENT);
-
     ui->stationCallsignCombo->setCurrentIndex(settings->lastCallsign);
     ui->operatorCombo->setCurrentIndex(settings->lastOperator);
 }
@@ -949,6 +1122,18 @@ QString MainWindow::getRepotValueFromMode(QString mode)
 void MainWindow::on_bandCombo_currentTextChanged(const QString &arg1)
 {
     settings->lastBand = arg1;
+    freqCat = static_cast<long>(ui->freqInput->text().toDouble() * 1000000);
+
+    if(settings->catEnable)
+    {
+        CAT->setBand(ui->bandCombo->currentIndex());
+        CAT->setMode(ui->modeCombo->findText(settings->lastMode));
+        CAT->setFreq(freqCat);
+        // если не поменяется на трансивере
+        CAT->old_band = ui->bandCombo->currentIndex();
+        CAT->old_mode = ui->modeCombo->findText(settings->lastMode);
+        CAT->old_freq = freqCat;
+    }
     SaveFormData();
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -957,14 +1142,19 @@ void MainWindow::on_modeCombo_currentTextChanged(const QString &arg1)
 {
     QString report;
     settings->lastMode = arg1;
-    SaveFormData();
-
     report = getRepotValueFromMode(arg1);
 
     if(report != "") {
         ui->rstrInput->setText(report);
         ui->rstsInput->setText(report);
     }
+
+    if(settings->catEnable && ui->modeCombo->findText(arg1) != CAT->res) { // установим модуляцию, если это не текущаяя модуляция
+        CAT->old_mode = ui->modeCombo->findText(arg1);
+        CAT->setMode(ui->modeCombo->findText(arg1));   // (чтобы эта строка не исполнялась при смене модуляции с помощью кнопок на трансивере)
+        //CAT->old_mode = ui->modeCombo->findText(arg1);
+    }
+    SaveFormData();
     //qDebug() << "Mode changed " << settings->lastMode;
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -985,12 +1175,17 @@ void MainWindow::SaveCallsignState()
     settings->lastCallsign = ui->stationCallsignCombo->currentIndex();
     settings->lastOperator = ui->operatorCombo->currentIndex();
     settings->saveForm();
-    //qDebug() << " Save lastCallsign " << ui->stationCallsignCombo->currentIndex();
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
 void MainWindow::on_freqInput_editingFinished()
 {
+    if(settings->catEnable) {
+        freqCat = static_cast<long>(ui->freqInput->text().toDouble() * 1000000);
+        CAT->setFreq(freqCat);
+        // если не поменяется на трансивере, то в окне снова будет частота трансивера
+        CAT->old_freq = freqCat;
+    }
     SaveFormData();
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
@@ -1032,12 +1227,162 @@ void MainWindow::darkTheime()
 }
 //------------------------------------------------------------------------------------------------------------------------------------------
 
+void MainWindow::insertDataToDeferredQSOs(int idx, QString hash)
+{
+    QSqlQuery query(db);
+    query.prepare("INSERT INTO DELRECORDS(id, HASH) VALUES(?, ?)");
+    query.addBindValue(idx);
+    query.addBindValue(hash);
 
+    qDebug() << QString::number(idx) << hash;
 
+    if(!query.exec()){
+        qDebug() << "ERROR insert data into deferred QSOs... " << query.lastError().text();
+     } else {
+        qDebug() << "Insert record " << QString::number(idx) << " into deferred QSOs.";
+     }
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
 
-//void MainWindow::on_actionLogger_CAT_triggered()
-//{
-    //logcat = new loggercat(this);
-    //loggercat->show();
-//}
+void MainWindow::RemoveDeferredQSOs()
+{
+    int rowcount = 0;
 
+    qDebug() << "Remove Deferred QSOs.";
+    db.transaction();
+    QSqlQuery query(db);
+    query.prepare("SELECT COUNT(*) FROM DELRECORDS");
+    query.exec(); query.next();
+    rowcount = query.value(0).toInt();
+
+    query.prepare("SELECT HASH FROM DELRECORDS");
+    query.exec(); query.next();
+
+    for(int i = rowcount; i > 0; i--) {
+        api->deleteByHashLog(query.value(0).toString());
+        qDebug() << "Del QSO: " << query.value(0).toString();
+        query.next();
+    }
+    query.prepare("DELETE FROM DELRECORDS");
+    query.exec();
+    db.commit();
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::EditQSO(QModelIndex index)
+{
+    int idx = index.row();
+    int dbid = RecordsModel->data(RecordsModel->index(idx, 0)).toInt();
+    int qsosu_callsign_id = RecordsModel->data(RecordsModel->index(idx, 2)).toInt();
+    int qsosu_operator_id = RecordsModel->data(RecordsModel->index(idx, 3)).toInt();
+    QString call = RecordsModel->data(RecordsModel->index(idx, 8)).toString();
+    QString date = RecordsModel->data(RecordsModel->index(idx, 9)).toString();
+    QString time_start = RecordsModel->data(RecordsModel->index(idx, 10)).toString();
+    QString time_stop = RecordsModel->data(RecordsModel->index(idx, 11)).toString();
+    QString band = RecordsModel->data(RecordsModel->index(idx, 12)).toString();
+    QString mode = RecordsModel->data(RecordsModel->index(idx, 14)).toString();
+    QString freq = RecordsModel->data(RecordsModel->index(idx, 13)).toString();
+    QString name = RecordsModel->data(RecordsModel->index(idx, 17)).toString();
+    QString qth = RecordsModel->data(RecordsModel->index(idx, 18)).toString();
+    QString rstr = RecordsModel->data(RecordsModel->index(idx, 16)).toString();
+    QString rsts = RecordsModel->data(RecordsModel->index(idx, 15)).toString();
+    QString locator = RecordsModel->data(RecordsModel->index(idx, 19)).toString();
+    QString rda = RecordsModel->data(RecordsModel->index(idx, 20)).toString();
+    QString comment = RecordsModel->data(RecordsModel->index(idx, 21)).toString();
+    QString ituz = RecordsModel->data(RecordsModel->index(idx, 24)).toString();
+    QString cqz = RecordsModel->data(RecordsModel->index(idx, 25)).toString();
+    QString country = RecordsModel->data(RecordsModel->index(idx, 27)).toString();
+    QString country_code = RecordsModel->data(RecordsModel->index(idx, 28)).toString();
+
+    QVariantList data;
+    data.clear();
+    data << dbid << qsosu_callsign_id << qsosu_operator_id << call << date << time_start << time_stop << band
+         << mode << freq << name << qth << rstr << rsts << locator << rda << ituz << cqz << comment << country << country_code;
+    qsoedit->ShowQSOParams(data);
+    qsoedit->show();
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::doubleClickedQSO(QModelIndex idx)
+{
+    EditQSO(idx);
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::PingQsoSu()
+{
+    api->getPing();
+    if(api->serviceAvailable) {
+        qsosuLabel->setText("Online");
+        qsosuLabel->setStyleSheet("QLabel { color: green }");
+    } else {
+        qsosuLabel->setText("Offline");
+        qsosuLabel->setStyleSheet("QLabel { color: red }");
+    }
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+/*void MainWindow::on_freqInput_textChanged(const QString &arg1)
+{
+    if(settings->catEnable) {
+        freqCat = static_cast<long>(ui->freqInput->text().toDouble() * 1000000);
+        CAT->setFreq(freqCat);
+        // если не поменяется на трансивере
+        CAT->old_freq = freqCat;
+    }
+}*/
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::setFreq(long freq)
+{
+    settings->lastFrequence = QString::number((double) freq / 1000000, 'f', 6);
+    ui->freqInput->setText(settings->lastFrequence);
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::setBand(int band)
+{
+    settings->lastBand = bandList[band].band_name;
+    ui->bandCombo->setCurrentText(bandList[band].band_name);
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::setMode(int mode)
+{
+    settings->lastMode = modeList[mode].mode_name;
+    ui->modeCombo->setCurrentText(modeList[mode].mode_name);
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::onQSOConfirmed()
+{
+    //qDebug() << "Test confirm slot!!";
+
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+int MainWindow::getSynchroStatus(int id)
+{
+    int state = 0;
+
+    QSqlQuery query(db);
+    query.exec(QString("SELECT SYNC_QSO FROM records WHERE id = %1").arg(id));
+
+    while(query.next()){
+        state = query.value(0).toInt();
+    }
+    return state;
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::on_gridsquareInput_textEdited(const QString &arg1)
+{
+    ui->gridsquareInput->setText(arg1.toUpper());
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
+
+void MainWindow::on_cntyInput_textEdited(const QString &arg1)
+{
+    ui->cntyInput->setText(arg1.toUpper());
+}
+//------------------------------------------------------------------------------------------------------------------------------------------
